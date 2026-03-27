@@ -15,18 +15,22 @@ load_dotenv()
 
 
 def setup_pgvector():
-    print("Setting up pgvector extension...")
+    print("Checking pgvector extension...")
     try:
-        engine = create_engine(os.getenv("DATABASE_URL"))
+        from app.database import engine
+        from sqlalchemy import text
         with engine.connect() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-            conn.commit()
-        print("✓ pgvector extension ready")
-        return True
+            result = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vector';"))
+            if result.fetchone():
+                print("✓ pgvector extension is active")
+                return True
+            else:
+                print("✗ pgvector not found — run this manually:")
+                print("  docker exec -it earnings-analyzer-db-1 psql -U postgres -d earnings_db -c \"CREATE EXTENSION vector;\"")
+                return False
     except Exception as e:
-        print(f"✗ pgvector setup failed: {e}")
+        print(f"✗ Could not verify pgvector: {e}")
         return False
-
 
 def create_tables():
     print("Creating database tables...")

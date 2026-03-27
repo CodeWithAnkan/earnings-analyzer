@@ -51,14 +51,18 @@ Text: {text[:3000]}"""
         # Strip accidental markdown fences
         clean = re.sub(r"^```(?:json)?\s*", "", response.strip())
         clean = re.sub(r"\s*```$", "", clean)
-        clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
+        clean = re.sub(r"</think>.*?</think>", "", clean, flags=re.DOTALL).strip()
+        match = re.search(r"(\{.*\})", clean, re.DOTALL)
+        if match:
+            return match.group(1)
         return clean
 
     def score_confidence(self, text):
         """Score speaker confidence based on hedge words (0.0 = very uncertain, 1.0 = very confident)."""
-        prompt = f"""Analyze the confidence level of this speaker based on language used.
-Look for hedge words (may, might, could, approximately, we believe, we expect, subject to)
-and definitive statements.
+        prompt = f"""Rate speaker confidence from 0.0 to 1.0.
+- 1.0: Definitive, factual, assertive (e.g., "We will," "Results show," "Strong demand").
+- 0.5: Neutral, standard corporate reporting.
+- 0.0: High uncertainty, non-committal (e.g., "Maybe," "Might," "Subject to change," "Hard to say").
 
 Return ONLY a single float between 0.0 and 1.0. No explanation.
 

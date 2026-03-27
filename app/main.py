@@ -1,8 +1,19 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from app.database import get_db, engine
 from app import models
 from app.ingestion.alphavantage import fetch_all_transcripts
+from app.intelligence.entity_extractor import entity_extractor
+from app.intelligence.confidence_scorer import confidence_scorer
+from app.intelligence.embeddings import get_finbert_encoder
+from app.intelligence.report_generator import report_generator
+from app.tasks.intelligence_tasks import (
+    process_entities_task,
+    process_confidence_task, 
+    process_embeddings_task,
+    generate_report_task,
+    process_full_intelligence_task
+)
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -130,3 +141,154 @@ def get_quarter_segments(ticker: str, quarter: str, db: Session = Depends(get_db
         }
         for s in segs
     ]
+
+# Intelligence endpoints
+
+@app.post("/intelligence/entities/{ticker}")
+def process_entities(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Process entity extraction for ticker (and optionally specific quarter)."""
+    result = entity_extractor.process_all_segments(db, ticker=ticker.upper(), quarter=quarter)
+    return result
+
+@app.post("/intelligence/confidence/{ticker}")
+def process_confidence(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Process confidence scoring for ticker (and optionally specific quarter)."""
+    result = confidence_scorer.process_all_segments(db, ticker=ticker.upper(), quarter=quarter)
+    return result
+
+@app.post("/intelligence/embeddings/{ticker}")
+def process_embeddings(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Process FinBERT embeddings for ticker (and optionally specific quarter)."""
+    encoder = get_finbert_encoder()
+    result = encoder.process_all_segments(db, ticker=ticker.upper(), quarter=quarter)
+    return result
+
+@app.post("/intelligence/full/{ticker}")
+def process_full_intelligence(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Run full intelligence pipeline (entities + confidence + embeddings) for ticker."""
+    # Get transcript(s) to process
+    query = db.query(models.Transcript).filter_by(ticker=ticker.upper())
+    if quarter:
+        query = query.filter_by(quarter=quarter)
+    
+    transcripts = query.all()
+    
+    if not transcripts:
+        raise HTTPException(status_code=404, detail="No transcripts found")
+    
+    # Queue background tasks for each transcript
+    task_ids = []
+    for transcript in transcripts:
+        task = process_full_intelligence_task.delay(transcript.id)
+        task_ids.append({
+            "transcript_id": transcript.id,
+            "quarter": transcript.quarter,
+            "task_id": task.id
+        })
+    
+    return {
+        "ticker": ticker.upper(),
+        "tasks_queued": len(task_ids),
+        "task_ids": task_ids
+    }
+
+@app.get("/intelligence/entities/{ticker}")
+def get_entities(ticker: str, entity_type: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Get extracted entities by type for ticker."""
+    if entity_type not in ["guidance", "risks", "metrics"]:
+        raise HTTPException(status_code=400, detail="entity_type must be guidance, risks, or metrics")
+    
+    entities = entity_extractor.get_entities_by_type(db, entity_type, ticker=ticker.upper(), quarter=quarter)
+    return {"ticker": ticker.upper(), "entity_type": entity_type, "entities": entities}
+
+@app.get("/intelligence/confidence/{ticker}")
+def get_confidence_stats(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Get confidence statistics for ticker."""
+    stats = confidence_scorer.get_confidence_stats(db, ticker=ticker.upper(), quarter=quarter)
+    return {"ticker": ticker.upper(), "quarter": quarter, "confidence_stats": stats}
+
+@app.get("/intelligence/low-confidence/{ticker}")
+def get_low_confidence_segments(ticker: str, threshold: float = 0.3, quarter: str = None, db: Session = Depends(get_db)):
+    """Get segments with confidence below threshold."""
+    segments = confidence_scorer.get_low_confidence_segments(db, threshold, ticker=ticker.upper(), quarter=quarter)
+    return {"ticker": ticker.upper(), "threshold": threshold, "segments": segments}
+
+@app.get("/intelligence/similar")
+def find_similar_segments(query: str, ticker: str = None, limit: int = 10, db: Session = Depends(get_db)):
+    """Find segments similar to query text using embeddings."""
+    encoder = get_finbert_encoder()
+    similar = encoder.find_similar_segments(db, query, ticker=ticker.upper(), limit=limit)
+    return {"query": query, "ticker": ticker, "similar_segments": similar}
+
+@app.get("/intelligence/embeddings/stats/{ticker}")
+def get_embedding_stats(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
+    """Get embedding statistics for ticker."""
+    encoder = get_finbert_encoder()
+    stats = encoder.get_embedding_stats(db, ticker=ticker.upper(), quarter=quarter)
+    return {"ticker": ticker.upper(), "embedding_stats": stats}
+
+@app.post("/intelligence/reports/{ticker}/{quarter}")
+def generate_report(ticker: str, quarter: str, db: Session = Depends(get_db)):
+    """Generate and save intelligence report for ticker and quarter."""
+    transcript = db.query(models.Transcript).filter_by(
+        ticker=ticker.upper(),
+        quarter=quarter
+    ).first()
+    
+    if not transcript:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    
+    report = report_generator.save_report(db, transcript.id)
+    
+    if not report:
+        raise HTTPException(status_code=500, detail="Failed to generate report")
+    
+    return {
+        "ticker": ticker.upper(),
+        "quarter": quarter,
+        "report_id": report.id,
+        "generated_at": report.created_at
+    }
+
+@app.get("/intelligence/reports/{ticker}/{quarter}")
+def get_report(ticker: str, quarter: str, db: Session = Depends(get_db)):
+    """Get saved intelligence report for ticker and quarter."""
+    report = report_generator.get_report(db, ticker.upper(), quarter)
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    return report
+
+@app.get("/intelligence/tasks/{task_id}")
+def get_task_status(task_id: str):
+    """Get status of background intelligence task."""
+    from app.tasks.celery_app import celery_app
+    
+    result = celery_app.AsyncResult(task_id)
+    
+    if result.state == 'PENDING':
+        response = {
+            'state': result.state,
+            'status': 'Task is waiting to be processed'
+        }
+    elif result.state == 'PROGRESS':
+        response = {
+            'state': result.state,
+            'status': result.info.get('status', ''),
+            'progress': result.info.get('progress', 0),
+            'processed': result.info.get('processed', 0),
+            'failed': result.info.get('failed', 0)
+        }
+    elif result.state == 'SUCCESS':
+        response = {
+            'state': result.state,
+            'result': result.result
+        }
+    else:  # FAILURE
+        response = {
+            'state': result.state,
+            'error': str(result.info)
+        }
+    
+    return response

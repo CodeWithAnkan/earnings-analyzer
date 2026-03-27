@@ -1,4 +1,6 @@
 import os
+import re
+import json
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -8,71 +10,71 @@ class SarvamClient:
     def __init__(self):
         self.client = OpenAI(
             api_key=os.getenv("SARVAM_API_KEY"),
-            base_url="https://api.sarvam.ai/v1"  # Sarvam API base URL
+            base_url="https://api.sarvam.ai/v1"
         )
-    
-    def chat_completion(self, messages, model="sarvam-1", temperature=0.1):
+        self.model = "sarvam-m"  # correct model name
+
+    def chat_completion(self, messages, temperature=0.1):
         """Create a chat completion using Sarvam API."""
         try:
             response = self.client.chat.completions.create(
-                model=model,
+                model=self.model,
                 messages=messages,
                 temperature=temperature
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Error in Sarvam API call: {e}")
+            print(f"Sarvam API error: {e}")
             return None
-    
+
     def extract_entities(self, text):
         """Extract entities (guidance, risks, metrics) from text."""
-        prompt = f"""
-        Extract financial entities from this earnings call transcript segment. 
-        Return JSON with these categories:
-        - guidance: forward-looking statements, forecasts, targets
-        - risks: risk factors, concerns, challenges mentioned  
-        - metrics: specific numbers, percentages, financial figures
-        
-        Text: {text}
-        
-        Response format:
-        {{
-            "guidance": ["entity1", "entity2"],
-            "risks": ["risk1", "risk2"], 
-            "metrics": ["metric1", "metric2"]
-        }}
-        """
-        
+        prompt = f"""Extract financial entities from this earnings call transcript segment.
+Return ONLY valid JSON — no markdown fences, no explanation:
+{{
+    "guidance": ["forward-looking statement 1", ...],
+    "risks": ["risk factor 1", ...],
+    "metrics": ["specific number or KPI 1", ...]
+}}
+
+Text: {text[:3000]}"""
+
         messages = [
-            {"role": "system", "content": "You are a financial analyst extracting structured entities from earnings calls."},
+            {"role": "system", "content": "You are a financial analyst extracting structured entities from earnings calls. Return only JSON."},
             {"role": "user", "content": prompt}
         ]
-        
-        return self.chat_completion(messages)
-    
+
+        response = self.chat_completion(messages)
+        if not response:
+            return None
+
+        # Strip accidental markdown fences
+        clean = re.sub(r"^```(?:json)?\s*", "", response.strip())
+        clean = re.sub(r"\s*```$", "", clean)
+        return clean
+
     def score_confidence(self, text):
-        """Score speaker confidence based on hedge words (0-1 scale)."""
-        prompt = f"""
-        Analyze the confidence level of this speaker based on language used.
-        Look for hedge words, uncertainty phrases, and definitive statements.
-        Return a confidence score from 0.0 (very uncertain) to 1.0 (very confident).
-        
-        Text: {text}
-        
-        Response format: Return only the number, e.g. "0.75"
-        """
-        
+        """Score speaker confidence based on hedge words (0.0 = very uncertain, 1.0 = very confident)."""
+        prompt = f"""Analyze the confidence level of this speaker based on language used.
+Look for hedge words (may, might, could, approximately, we believe, we expect, subject to)
+and definitive statements.
+
+Return ONLY a single float between 0.0 and 1.0. No explanation.
+
+Text: {text[:2000]}"""
+
         messages = [
-            {"role": "system", "content": "You are an expert at detecting confidence levels in business communication."},
+            {"role": "system", "content": "You are an expert at detecting confidence levels in business communication. Return only a number."},
             {"role": "user", "content": prompt}
         ]
-        
+
         response = self.chat_completion(messages, temperature=0.0)
-        
+
         try:
             return float(response.strip())
         except (ValueError, AttributeError):
-            return 0.5  # Default middle confidence
+            return 0.5  # default middle confidence
+
 
 # Global client instance
 sarvam_client = SarvamClient()

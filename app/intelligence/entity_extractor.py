@@ -86,10 +86,12 @@ class EntityExtractor:
         """Retrieve entities of a specific type."""
         query = db.query(models.EntityExtraction).filter_by(entity_type=entity_type)
         
-        if ticker:
-            query = query.join(models.Segment).filter(models.Segment.ticker == ticker.upper())
-        if quarter:
-            query = query.join(models.Segment).filter(models.Segment.quarter == quarter)
+        if ticker or quarter:
+            query = query.join(models.Segment, models.EntityExtraction.segment_id == models.Segment.id)
+            if ticker:
+                query = query.filter(models.Segment.ticker == ticker.upper())
+            if quarter:
+                query = query.filter(models.Segment.quarter == quarter)
         
         extractions = query.all()
         

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import VECTOR
+from pgvector.sqlalchemy import Vector
 from app.database import Base
 
 class Transcript(Base):
@@ -27,7 +27,7 @@ class Segment(Base):
     segment_type   = Column(String(30))
     text           = Column(Text)
     confidence_score = Column(Float, default=0.5)
-    embedding      = Column(VECTOR(768))  # FinBERT embedding dimension
+    embedding      = Column(Vector(768))  # FinBERT embedding dimension
     created_at     = Column(DateTime, default=func.now())
 
 class EntityExtraction(Base):

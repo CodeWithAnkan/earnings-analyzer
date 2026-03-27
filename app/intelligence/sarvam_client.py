@@ -51,6 +51,7 @@ Text: {text[:3000]}"""
         # Strip accidental markdown fences
         clean = re.sub(r"^```(?:json)?\s*", "", response.strip())
         clean = re.sub(r"\s*```$", "", clean)
+        clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
         return clean
 
     def score_confidence(self, text):
@@ -69,11 +70,22 @@ Text: {text[:2000]}"""
         ]
 
         response = self.chat_completion(messages, temperature=0.0)
+        if not response:
+            return 0.5
 
+        # 1. Fix the 'think' tag regex (yours had </think> twice)
+        clean = re.sub(r"</think>.*?</think>", "", response, flags=re.DOTALL).strip()
+    
+        # 2. Extract the first float/int found in the response
+        match = re.search(r"(\d?\.\d+|\d+)", clean)
+    
         try:
-            return float(response.strip())
-        except (ValueError, AttributeError):
-            return 0.5  # default middle confidence
+            if match:
+                val = float(match.group(1))
+                return max(0.0, min(1.0, val)) # Clamp between 0 and 1
+            return 0.5
+        except (ValueError, TypeError):
+            return 0.5
 
 
 # Global client instance

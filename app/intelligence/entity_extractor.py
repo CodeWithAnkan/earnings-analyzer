@@ -28,12 +28,13 @@ class EntityExtractor:
                     return entities
                 except json.JSONDecodeError:
                     pass
-            print(f"Failed to parse entity extraction response: {response}")
+            print(f"Failed to parse entity extraction response: {response[:100]}")
             return None
     
     def process_segment(self, db: Session, segment: models.Segment) -> bool:
         """Process a single segment and save entity extractions."""
-        entities = self.extract_entities_from_text(segment.text)
+        text = segment.text[:2000] if len(segment.text) > 2000 else segment.text
+        entities = self.extract_entities_from_text(text)
         
         if not entities:
             return False
@@ -72,6 +73,12 @@ class EntityExtractor:
         
         for segment in segments:
             try:
+                existing = db.query(models.EntityExtraction).filter_by(
+                    segment_id=segment.id
+                ).first()
+                if existing:
+                    processed += 1
+                    continue
                 if self.process_segment(db, segment):
                     processed += 1
                     print(f"✓ Processed segment {segment.id}")

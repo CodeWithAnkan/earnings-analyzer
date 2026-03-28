@@ -1,3 +1,4 @@
+import re
 import json
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
@@ -20,6 +21,13 @@ class EntityExtractor:
             entities = json.loads(response)
             return entities
         except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', response, re.DOTALL)
+            if match:
+                try:
+                    entities = json.loads(match.group())
+                    return entities
+                except json.JSONDecodeError:
+                    pass
             print(f"Failed to parse entity extraction response: {response}")
             return None
     

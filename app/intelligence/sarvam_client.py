@@ -20,7 +20,8 @@ class SarvamClient:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=temperature
+                temperature=temperature,
+                max_tokens=2000
             )
             return response.choices[0].message.content
         except Exception as e:

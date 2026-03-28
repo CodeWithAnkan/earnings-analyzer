@@ -7,11 +7,13 @@ from app.intelligence.entity_extractor import entity_extractor
 from app.intelligence.confidence_scorer import confidence_scorer
 from app.intelligence.embeddings import get_finbert_encoder
 from app.intelligence.report_generator import report_generator
+from app.intelligence.drift_calculator import drift_calculator
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Earnings Analyzer")
 
+# ─── Core ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -107,8 +109,7 @@ def get_quarter_segments(ticker: str, quarter: str, db: Session = Depends(get_db
         for s in segs
     ]
 
-
-# ─── Intelligence endpoints ───────────────────────────────────────────────────
+# ─── Phase 1: Intelligence ────────────────────────────────────────────────────
 
 @app.post("/intelligence/entities/{ticker}")
 def process_entities(ticker: str, quarter: str = None, db: Session = Depends(get_db)):
@@ -150,7 +151,6 @@ def process_full_intelligence(ticker: str, quarter: str = None, db: Session = De
         })
 
     return {"ticker": ticker.upper(), "tasks_queued": len(task_ids), "task_ids": task_ids}
-
 
 @app.get("/intelligence/entities/{ticker}")
 def get_entities(ticker: str, entity_type: str, quarter: str = None, db: Session = Depends(get_db)):
@@ -228,3 +228,164 @@ def get_task_status(task_id: str):
         return {"state": result.state, "result": result.result}
     else:
         return {"state": result.state, "error": str(result.info)}
+
+# ─── Phase 2: Drift Detection ─────────────────────────────────────────────────
+
+@app.post("/drift/calculate/{ticker}")
+def calculate_drift(ticker: str, db: Session = Depends(get_db)):
+    """
+    Compute drift scores for all consecutive quarter pairs for a ticker.
+    Synchronous — fast (< 2 s per ticker).
+    Overwrites any previous drift scores for this ticker.
+    """
+    result = drift_calculator.calculate_drift(db, ticker.upper())
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+ 
+ 
+@app.post("/drift/calculate-async/{ticker}")
+def calculate_drift_async(ticker: str):
+    """Queue drift calculation as a background Celery task."""
+    from app.tasks.drift_tasks import calculate_drift_task
+    task = calculate_drift_task.delay(ticker.upper())
+    return {"ticker": ticker.upper(), "task_id": task.id}
+ 
+ 
+@app.post("/drift/calculate-multi")
+def calculate_drift_multi(tickers: list[str]):
+    """
+    Queue drift calculation for multiple tickers at once.
+    Body (JSON array): ["NVDA", "AAPL", "MSFT"]
+    """
+    from app.tasks.drift_tasks import calculate_drift_multi_task
+    task = calculate_drift_multi_task.delay(tickers)
+    return {"tickers": tickers, "task_id": task.id}
+ 
+ 
+@app.get("/drift/timeline/{ticker}")
+def get_drift_timeline(
+    ticker: str,
+    topic: str = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Full drift history for a ticker across all quarters.
+    Optional ?topic=guidance|risks|metrics|overall
+    """
+    scores = drift_calculator.get_drift_timeline(db, ticker.upper(), topic=topic)
+    if not scores:
+        raise HTTPException(
+            status_code=404,
+            detail="No drift scores found. Run POST /drift/calculate/{ticker} first."
+        )
+    return {"ticker": ticker.upper(), "topic": topic, "drift_timeline": scores}
+ 
+ 
+@app.get("/drift/alerts/{ticker}")
+def get_drift_alerts(
+    ticker: str,
+    severity: str = "drifting",
+    db: Session = Depends(get_db),
+):
+    """
+    Return active drift alerts for a ticker.
+    severity='drifting'    → drifting + sharp_break (default)
+    severity='sharp_break' → only the most severe
+    Sorted by drift_score descending (worst first).
+    """
+    if severity not in ("drifting", "sharp_break"):
+        raise HTTPException(status_code=400, detail="severity must be 'drifting' or 'sharp_break'")
+    alerts = drift_calculator.get_alerts(db, ticker.upper(), min_label=severity)
+    return {
+        "ticker":          ticker.upper(),
+        "severity_filter": severity,
+        "alert_count":     len(alerts),
+        "alerts":          alerts,
+    }
+ 
+ 
+@app.get("/drift/quotes/{ticker}")
+def get_drifted_quotes(
+    ticker: str,
+    topic: str,
+    quarter_from: str,
+    quarter_to: str,
+    top_n: int = 5,
+    db: Session = Depends(get_db),
+):
+    """
+    For a specific drift alert, return the top_n sentences in quarter_to
+    that drifted most from the quarter_from centroid.
+ 
+    This is the "evidence layer" — shows WHAT changed, not just THAT it changed.
+ 
+    Example:
+      GET /drift/quotes/NVDA?topic=risks&quarter_from=2023Q4&quarter_to=2024Q1&top_n=5
+    """
+    quotes = drift_calculator.get_drifted_quotes(
+        db,
+        ticker=ticker.upper(),
+        topic=topic,
+        quarter_from=quarter_from,
+        quarter_to=quarter_to,
+        top_n=top_n,
+    )
+    if not quotes:
+        raise HTTPException(
+            status_code=404,
+            detail="No quotes found. Check embeddings exist for both quarters and topic."
+        )
+    return {
+        "ticker":          ticker.upper(),
+        "topic":           topic,
+        "quarter_from":    quarter_from,
+        "quarter_to":      quarter_to,
+        "top_n":           top_n,
+        "drifted_quotes":  quotes,
+    }
+ 
+ 
+@app.get("/drift/compare/{ticker}")
+def compare_quarters(
+    ticker: str,
+    quarter_from: str,
+    quarter_to: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Ad-hoc side-by-side drift comparison for two specific quarters across all topics.
+    Does NOT require drift_scores to be pre-computed.
+ 
+    Example:
+      GET /drift/compare/NVDA?quarter_from=2023Q4&quarter_to=2024Q1
+    """
+    return drift_calculator.compare_quarters(db, ticker.upper(), quarter_from, quarter_to)
+ 
+ 
+@app.get("/drift/summary")
+def drift_summary(db: Session = Depends(get_db)):
+    """
+    High-level overview: for every ticker, how many stable / drifting / sharp_break
+    signals exist? Good dashboard entry point.
+    """
+    from sqlalchemy import func as sa_func
+ 
+    rows = (
+        db.query(
+            models.DriftScore.ticker,
+            models.DriftScore.label,
+            sa_func.count(models.DriftScore.id).label("count"),
+        )
+        .group_by(models.DriftScore.ticker, models.DriftScore.label)
+        .order_by(models.DriftScore.ticker)
+        .all()
+    )
+ 
+    summary: dict = {}
+    for ticker, label, count in rows:
+        if ticker not in summary:
+            summary[ticker] = {"stable": 0, "drifting": 0, "sharp_break": 0}
+        summary[ticker][label] = count
+ 
+    return {"summary": summary}

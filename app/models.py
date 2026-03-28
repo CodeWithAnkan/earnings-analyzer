@@ -26,7 +26,7 @@ class Segment(Base):
     role           = Column(String(20))
     segment_type   = Column(String(30))
     text           = Column(Text)
-    confidence_score = Column(Float, default=0.5)
+    confidence_score = Column(Float, nullable=True)
     embedding      = Column(Vector(768))  # FinBERT embedding dimension
     created_at     = Column(DateTime, default=func.now())
 
@@ -49,3 +49,30 @@ class CallReport(Base):
     quarter     = Column(String(20))
     report_json = Column(Text)  # Structured JSON report
     created_at  = Column(DateTime, default=func.now())
+
+class DriftScore(Base):
+    """
+    Stores the cosine drift between two consecutive quarters
+    for a given ticker + topic combination.
+ 
+    drift_score is cosine *distance* (1 - cosine_similarity), so:
+      0.0  = identical embeddings (no drift)
+      1.0  = completely orthogonal (maximum drift)
+ 
+    label thresholds (tunable in drift_calculator.py):
+      < 0.10  → stable
+      0.10–0.25 → drifting
+      > 0.25  → sharp_break
+    """
+    __tablename__ = "drift_scores"
+ 
+    id                 = Column(Integer, primary_key=True, index=True)
+    ticker             = Column(String(10), index=True)
+    topic              = Column(String(50), index=True)  # guidance | risks | metrics | overall
+    quarter_from       = Column(String(20))              # earlier quarter
+    quarter_to         = Column(String(20))              # later quarter
+    drift_score        = Column(Float)                   # cosine distance 0.0–1.0
+    label              = Column(String(20))              # stable | drifting | sharp_break
+    segment_count_from = Column(Integer, default=0)      # segments that contributed
+    segment_count_to   = Column(Integer, default=0)
+    created_at         = Column(DateTime, default=func.now())

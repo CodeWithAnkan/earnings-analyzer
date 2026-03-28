@@ -51,18 +51,17 @@ Text: {text[:3000]}"""
         # Strip accidental markdown fences
         clean = re.sub(r"^```(?:json)?\s*", "", response.strip())
         clean = re.sub(r"\s*```$", "", clean)
-        clean = re.sub(r"</think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-        match = re.search(r"(\{.*\})", clean, re.DOTALL)
-        if match:
-            return match.group(1)
+        clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
         return clean
 
     def score_confidence(self, text):
         """Score speaker confidence based on hedge words (0.0 = very uncertain, 1.0 = very confident)."""
-        prompt = f"""Rate speaker confidence from 0.0 to 1.0.
-- 1.0: Definitive, factual, assertive (e.g., "We will," "Results show," "Strong demand").
-- 0.5: Neutral, standard corporate reporting.
-- 0.0: High uncertainty, non-committal (e.g., "Maybe," "Might," "Subject to change," "Hard to say").
+        prompt = f"""Analyze the speaker's confidence based on their linguistic certainty and commitment to their statements.
+Consider the following:
+
+High Confidence (towards 1.0): Use of definitive verbs (will, shall, is, are), concrete data points, direct answers, and assertive phrasing.
+Low Confidence (towards 0.0): Frequent use of modal verbs (might, could, may), hedge words (perhaps, we believe, approximately, subject to), stalling, or non-committal phrasing.
+Provide a nuanced score between 0.0 and 1.0 that reflects the overall tone of the speaker in this specific segment.
 
 Return ONLY a single float between 0.0 and 1.0. No explanation.
 

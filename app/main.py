@@ -8,10 +8,26 @@ from app.intelligence.confidence_scorer import confidence_scorer
 from app.intelligence.embeddings import get_finbert_encoder
 from app.intelligence.report_generator import report_generator
 from app.intelligence.drift_calculator import drift_calculator
+from sqlalchemy import or_
 
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Earnings Analyzer")
+from fastapi.middleware.cors import CORSMiddleware
+import os
+
+app = FastAPI(title="Veritas AI")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:4173",
+        os.getenv("FRONTEND_URL", ""),
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ─── Core ─────────────────────────────────────────────────────────────────────
 
@@ -389,3 +405,62 @@ def drift_summary(db: Session = Depends(get_db)):
         summary[ticker][label] = count
  
     return {"summary": summary}
+
+# ─── ADD THIS BLOCK to app/main.py — after the Phase 2 drift endpoints ───────
+#
+# Paste this into app/main.py
+
+@app.get("/search")
+def search_segments(
+    q: str,
+    mode: str = "keyword",
+    ticker: str = None,
+    limit: int = 40,
+    db: Session = Depends(get_db),
+):
+    """
+    Text-based search across segment content and speaker names.
+
+    mode=keyword  → full-text search inside segment.text (case-insensitive LIKE)
+    mode=speaker  → search inside segment.speaker name
+
+    For semantic search, use GET /intelligence/similar?query=...
+    For entity search, use GET /intelligence/entities/{ticker}?entity_type=...
+    """
+    
+    if mode not in ("keyword", "speaker"):
+        raise HTTPException(status_code=400, detail="mode must be 'keyword' or 'speaker'")
+
+    query = db.query(models.Segment)
+
+    if ticker:
+        query = query.filter(models.Segment.ticker == ticker.upper())
+
+    if mode == "keyword":
+        query = query.filter(
+            models.Segment.text.ilike(f"%{q}%")
+        )
+    elif mode == "speaker":
+        query = query.filter(
+            models.Segment.speaker.ilike(f"%{q}%")
+        )
+
+    segments = query.order_by(
+        models.Segment.ticker,
+        models.Segment.quarter.desc()
+    ).limit(limit).all()
+
+    return [
+        {
+            "id":               s.id,
+            "ticker":           s.ticker,
+            "quarter":          s.quarter,
+            "speaker":          s.speaker,
+            "role":             s.role,
+            "segment_type":     s.segment_type,
+            "confidence_score": s.confidence_score,
+            "text":             s.text,
+            "preview":          s.text[:300] if s.text else "",
+        }
+        for s in segments
+    ]

@@ -95,7 +95,7 @@ class FinBERTEncoder:
 
         similarities = []
         for segment in segments:
-            if segment.embedding:
+            if segment.embedding is not None:
                 seg_emb = np.array(segment.embedding)
                 sim = np.dot(query_embedding, seg_emb) / (
                     np.linalg.norm(query_embedding) * np.linalg.norm(seg_emb)

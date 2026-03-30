@@ -3,3 +3,9 @@ venv/
 __pycache__/
 *.pyc
 veritas_backup.sql
+
+Dockerfile
+requirements_hf.txt
+README_HF.md
+CORS_ADDITION.py
+BACKEND_ADDITION.py

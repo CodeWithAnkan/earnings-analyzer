@@ -5,7 +5,6 @@ from app import models
 from app.ingestion.alphavantage import fetch_all_transcripts
 from app.intelligence.entity_extractor import entity_extractor
 from app.intelligence.confidence_scorer import confidence_scorer
-from app.intelligence.embeddings import get_finbert_encoder
 from app.intelligence.report_generator import report_generator
 from app.intelligence.drift_calculator import drift_calculator
 from sqlalchemy import or_

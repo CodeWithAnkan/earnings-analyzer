@@ -5,6 +5,9 @@ batch_ingest.py
 Ingest a batch of tickers and run the full intelligence + drift pipeline.
 Designed to be run daily — 3 tickers/day stays within AlphaVantage free tier.
 
+Runs entirely via direct Python imports — no local server required.
+Safe to run from GitHub Actions, cron, or locally.
+
 RESUME SAFE: Re-running the same batch skips already-completed work at every step.
 - Ingest:       skips quarters already in DB
 - Intelligence: skips segments that already have EntityExtraction rows (entities)
@@ -22,13 +25,10 @@ Usage:
     python batch_ingest.py --ticker TSLA
 """
 
-import requests
 import time
 import argparse
 import sys
 from datetime import datetime
-
-BASE_URL = "http://localhost:8000"
 
 BATCHES = {
     1: ["GOOGL", "AMZN", "META"],
@@ -49,26 +49,93 @@ RESET  = "\033[0m"
 
 def log(msg, colour=RESET):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"{colour}[{ts}] {msg}{RESET}")
+    print(f"{colour}[{ts}] {msg}{RESET}", flush=True)
 
 
 # ── Step 1: Ingest ─────────────────────────────────────────────────────────────
 
 def ingest_ticker(ticker: str) -> bool:
     log(f"Ingesting {ticker}...", CYAN)
-    r = requests.post(f"{BASE_URL}/ingest/{ticker}", timeout=60)
-    if r.status_code != 200:
-        log(f"  ✗ Ingest failed: {r.status_code} {r.text[:100]}", RED)
+
+    from app.database import SessionLocal
+    from app import models
+    from app.ingestion.alphavantage import fetch_all_transcripts
+
+    db = SessionLocal()
+    try:
+        all_transcripts = fetch_all_transcripts(ticker.upper())
+
+        if not all_transcripts:
+            log(f"  ✗ No transcripts found for {ticker}", RED)
+            return False
+
+        ingested = []
+
+        for data in all_transcripts:
+            existing = db.query(models.Transcript).filter_by(
+                ticker=ticker.upper(), quarter=data["quarter"]
+            ).first()
+            if existing:
+                log(f"  Skipping {data['quarter']} — already ingested", YELLOW)
+                continue
+
+            transcript = models.Transcript(
+                ticker=ticker.upper(),
+                quarter=data["quarter"],
+                filed_at=data["quarter"],
+                raw_text=f"{ticker} {data['quarter']} earnings call"
+            )
+            db.add(transcript)
+            db.flush()
+
+            segment_count = 0
+            for seg in data["segments"]:
+                speaker = seg.get("speaker", "Unknown")
+                title   = seg.get("title", "")
+                content = seg.get("content", "")
+
+                if not content or len(content) < 20:
+                    continue
+
+                role = "management"
+                if any(word in title.lower() or word in speaker.lower() for word in [
+                    "analyst", "research", "capital", "securities", "partners", "bank", "operator"
+                ]):
+                    role = "analyst"
+
+                segment_type = "prepared_remarks"
+                if "question" in content.lower()[:100] or "q&a" in content.lower()[:100]:
+                    segment_type = "qa"
+
+                db.add(models.Segment(
+                    transcript_id=transcript.id,
+                    ticker=ticker.upper(),
+                    quarter=data["quarter"],
+                    speaker=speaker[:200],
+                    title=title[:500],
+                    role=role,
+                    segment_type=segment_type,
+                    text=content
+                ))
+                segment_count += 1
+
+            db.commit()
+            ingested.append({"quarter": data["quarter"], "segments": segment_count})
+            log(f"  ✓ {data['quarter']}: {segment_count} segments", GREEN)
+
+        if not ingested:
+            log(f"  ✓ Already up to date — skipping", YELLOW)
+        else:
+            log(f"  ✓ {len(ingested)} new quarters ingested", GREEN)
+
+        return True
+
+    except Exception as e:
+        db.rollback()
+        log(f"  ✗ Ingest failed: {e}", RED)
         return False
-    data = r.json()
-    quarters = data.get("ingested", [])
-    if quarters:
-        log(f"  ✓ {len(quarters)} new quarters ingested", GREEN)
-        for q in quarters:
-            log(f"      {q['quarter']}: {q['segments']} segments", GREEN)
-    else:
-        log(f"  ✓ Already up to date — skipping", YELLOW)
-    return True
+    finally:
+        db.close()
 
 
 # ── Step 2: Intelligence (direct Python, no HTTP timeout) ─────────────────────
@@ -90,7 +157,6 @@ def run_intelligence(ticker: str) -> bool:
 
         all_ids = [s.id for s in all_segments]
 
-        # Pre-fetch which segments already have entity extractions
         done_entity_ids = {
             row[0]
             for row in db.query(models.EntityExtraction.segment_id)
@@ -99,12 +165,7 @@ def run_intelligence(ticker: str) -> bool:
             .all()
         }
 
-        # Segments needing entities: no EntityExtraction row at all
-        ent_todo = [s for s in all_segments if s.id not in done_entity_ids]
-
-        # Segments needing confidence: confidence_score is NULL
-        # (NULL = never scored; 0.5 default is set at DB level so
-        #  we use None check which catches truly unscored rows)
+        ent_todo  = [s for s in all_segments if s.id not in done_entity_ids]
         conf_todo = [s for s in all_segments if s.confidence_score is None]
 
         log(
@@ -118,7 +179,6 @@ def run_intelligence(ticker: str) -> bool:
             log(f"  ✓ All segments already processed — skipping", YELLOW)
             return True
 
-        # Work through the union of segments that need at least one step
         todo_ids  = {s.id for s in ent_todo} | {s.id for s in conf_todo}
         todo_segs = [s for s in all_segments if s.id in todo_ids]
         total     = len(todo_segs)
@@ -128,7 +188,6 @@ def run_intelligence(ticker: str) -> bool:
 
         for i, seg in enumerate(todo_segs):
 
-            # Entities
             if seg.id not in done_entity_ids:
                 try:
                     if entity_extractor.process_segment(db, seg):
@@ -139,7 +198,6 @@ def run_intelligence(ticker: str) -> bool:
                     log(f"  entity error seg {seg.id}: {e}", RED)
                     ent_failed += 1
 
-            # Confidence
             if seg.confidence_score is None:
                 try:
                     if confidence_scorer.process_segment(db, seg):
@@ -183,15 +241,11 @@ def run_embeddings(ticker: str) -> bool:
     db = SessionLocal()
     try:
         encoder = get_finbert_encoder()
-        # process_all_segments already skips segments with existing embeddings
-        result = encoder.process_all_segments(db, ticker=ticker.upper())
+        result  = encoder.process_all_segments(db, ticker=ticker.upper())
         if result["total"] == 0:
             log(f"  ✓ All embeddings already exist — skipping", YELLOW)
         else:
-            log(
-                f"  ✓ {result['processed']} embedded, {result['failed']} failed",
-                GREEN
-            )
+            log(f"  ✓ {result['processed']} embedded, {result['failed']} failed", GREEN)
         return True
     except Exception as e:
         db.rollback()
@@ -205,22 +259,37 @@ def run_embeddings(ticker: str) -> bool:
 
 def run_drift(ticker: str) -> bool:
     log(f"Drift calculation for {ticker}...", CYAN)
-    r = requests.post(f"{BASE_URL}/drift/calculate/{ticker}", timeout=60)
-    if r.status_code != 200:
-        log(f"  ✗ Drift failed: {r.status_code}", RED)
+
+    from app.database import SessionLocal
+    from app.intelligence.drift_calculator import drift_calculator
+
+    db = SessionLocal()
+    try:
+        result = drift_calculator.calculate_drift(db, ticker.upper())
+
+        if "error" in result:
+            log(f"  ✗ Drift failed: {result['error']}", RED)
+            return False
+
+        n      = result.get("drift_scores_created", 0)
+        alerts = [x for x in result.get("results", []) if x["label"] != "stable"]
+        log(f"  ✓ {n} scores computed, {len(alerts)} alert(s)", GREEN)
+
+        for a in alerts:
+            colour = RED if a["label"] == "sharp_break" else YELLOW
+            log(
+                f"      {colour}[{a['label']}] {a['topic']} "
+                f"{a['quarter_from']}→{a['quarter_to']} "
+                f"score={a['drift_score']:.4f}{RESET}"
+            )
+        return True
+
+    except Exception as e:
+        db.rollback()
+        log(f"  ✗ Drift failed: {e}", RED)
         return False
-    d = r.json()
-    n      = d.get("drift_scores_created", 0)
-    alerts = [x for x in d.get("results", []) if x["label"] != "stable"]
-    log(f"  ✓ {n} scores computed, {len(alerts)} alert(s)", GREEN)
-    for a in alerts:
-        colour = RED if a["label"] == "sharp_break" else YELLOW
-        log(
-            f"      {colour}[{a['label']}] {a['topic']} "
-            f"{a['quarter_from']}→{a['quarter_to']} "
-            f"score={a['drift_score']:.4f}{RESET}"
-        )
-    return True
+    finally:
+        db.close()
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────────────
@@ -257,12 +326,6 @@ def main():
     group.add_argument("--ticker", type=str)
     args = parser.parse_args()
 
-    try:
-        assert requests.get(f"{BASE_URL}/", timeout=5).status_code == 200
-    except Exception:
-        print(f"{RED}Server not running: uvicorn app.main:app --reload{RESET}")
-        sys.exit(1)
-
     tickers = [args.ticker.upper()] if args.ticker else BATCHES[args.batch]
 
     print(f"\n{BOLD}Batch Ingestion — {datetime.now().strftime('%Y-%m-%d %H:%M')}{RESET}")
@@ -289,7 +352,6 @@ def main():
         sys.exit(1)
     else:
         print(f"\n{GREEN}All done.{RESET}")
-        print(f"Alerts: GET {BASE_URL}/drift/summary")
 
 
 if __name__ == "__main__":

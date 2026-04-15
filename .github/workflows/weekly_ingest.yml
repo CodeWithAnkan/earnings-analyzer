@@ -1,0 +1,108 @@
+name: Weekly Earnings Ingest
+
+on:
+  schedule:
+    # Runs Monday–Friday at 10:00 UTC (one batch per day)
+    - cron: '0 10 * * 1'  # Monday   — batch 1: GOOGL, AMZN, META
+    - cron: '0 10 * * 2'  # Tuesday  — batch 2: TSLA, JPM, V
+    - cron: '0 10 * * 3'  # Wednesday — batch 3: JNJ, WMT, XOM
+    - cron: '0 10 * * 4'  # Thursday — batch 4: UNH, MA, LLY
+    - cron: '0 10 * * 5'  # Friday   — batch 5: AVGO, HD, MRK
+    - cron: '0 10 * * 6'  # Saturday — batch 6: CVX, PEP, COST
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+    # Usage: go to Actions tab → Weekly Earnings Ingest → Run workflow
+    inputs:
+      batch:
+        description: 'Batch number to run (1-6), or leave empty to run all'
+        required: false
+        default: ''
+      ticker:
+        description: 'Single ticker to run (e.g. NVDA), overrides batch'
+        required: false
+        default: ''
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Set default BATCH_ARG ───────────────────────────────────────────────
+      - name: Initialize BATCH_ARG
+        run: echo "BATCH_ARG=" >> $GITHUB_ENV
+
+      # ── Determine which batch to run based on day of week ──────────────────
+      # For scheduled runs, each cron fires on a specific day.
+      # We map day-of-week → batch number here.
+      - name: Resolve batch number (scheduled runs)
+        if: github.event_name == 'schedule'
+        run: |
+          DAY=$(date +%u)   # 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri
+          echo "BATCH_ARG=--batch $DAY" >> $GITHUB_ENV
+
+      # ── Manual trigger: single ticker ──────────────────────────────────────
+      - name: Resolve args (manual — ticker)
+        if: github.event_name == 'workflow_dispatch' && inputs.ticker != ''
+        run: |
+          echo "BATCH_ARG=--ticker ${{ inputs.ticker }}" >> $GITHUB_ENV
+
+      # ── Manual trigger: specific batch ─────────────────────────────────────
+      - name: Resolve args (manual — batch)
+        if: github.event_name == 'workflow_dispatch' && inputs.batch != '' && inputs.ticker == ''
+        run: |
+          echo "BATCH_ARG=--batch ${{ inputs.batch }}" >> $GITHUB_ENV
+
+      # ── Manual trigger: run all batches ────────────────────────────────────
+      - name: Run all batches (manual — no input)
+        if: github.event_name == 'workflow_dispatch' && inputs.batch == '' && inputs.ticker == ''
+        env:
+          DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+          ALPHAVANTAGE_KEY: ${{ secrets.ALPHAVANTAGE_KEY }}
+          SARVAM_API_KEY:   ${{ secrets.SARVAM_API_KEY }}
+          REDIS_URL:        ${{ secrets.REDIS_URL }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            echo "===== Running batch $i ====="
+            python batch_ingest.py --batch $i
+            echo "Sleeping 60s between batches..."
+            sleep 60
+          done
+
+      # ── Normal run (scheduled or single batch/ticker manual) ───────────────
+      - name: Run ingestion
+        if: |
+          (github.event_name == 'schedule') ||
+          (github.event_name == 'workflow_dispatch' && (inputs.batch != '' || inputs.ticker != ''))
+        env:
+          DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+          ALPHAVANTAGE_KEY: ${{ secrets.ALPHAVANTAGE_KEY }}
+          SARVAM_API_KEY:   ${{ secrets.SARVAM_API_KEY }}
+          REDIS_URL:        ${{ secrets.REDIS_URL }}
+        run: |
+          echo "Running: python batch_ingest.py $BATCH_ARG"
+          python batch_ingest.py $BATCH_ARG
+
+      # ── Saturday: run batch 6 (CVX, PEP, COST) ────────────────────────────
+      # Cron only supports Mon–Fri above cleanly, so batch 6 runs manually
+      # or you can add a 6th cron line:
+      # - cron: '0 10 * * 6'  # Saturday — batch 6: CVX, PEP, COST
+      # (Uncomment in the schedule block above if desired)
+
+      - name: Log completion
+        if: always()
+        run: |
+          echo "Ingest job finished at $(date)"
+          echo "Batch arg: ${BATCH_ARG:-'(not set)'}"

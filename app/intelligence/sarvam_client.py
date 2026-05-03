@@ -11,9 +11,11 @@ load_dotenv()
 
 class SarvamClient:
     def __init__(self):
+        import httpx
         self.client = OpenAI(
             api_key=os.getenv("SARVAM_API_KEY"),
-            base_url="https://api.sarvam.ai/v1"
+            base_url="https://api.sarvam.ai/v1",
+            http_client=httpx.Client()
         )
         self.model = "sarvam-m"
 

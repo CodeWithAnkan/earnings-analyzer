@@ -7,7 +7,9 @@ from app.intelligence.entity_extractor import entity_extractor
 from app.intelligence.confidence_scorer import confidence_scorer
 from app.intelligence.report_generator import report_generator
 from app.intelligence.drift_calculator import drift_calculator
+from app.intelligence.embeddings import get_finbert_encoder
 from sqlalchemy import or_
+
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -21,7 +23,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:4173",
-        os.getenv("FRONTEND_URL", ""),
+        *os.getenv("FRONTEND_URL", "").split(";"),
     ],
     allow_credentials=True,
     allow_methods=["*"],

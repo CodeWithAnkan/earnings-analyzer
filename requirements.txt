@@ -1,12 +1,15 @@
-fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-python-dotenv
-requests
-openai
-sentence-transformers
-torch
-pgvector
-celery
-redis
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+requests==2.31.0
+openai==1.30.1
+sentence-transformers==3.0.0
+torch==2.6.0+cpu
+pgvector==0.2.5
+celery==5.4.0
+redis==5.0.4
+numpy==1.26.4
+scikit-learn==1.4.2
